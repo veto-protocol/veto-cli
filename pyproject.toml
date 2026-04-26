@@ -1,0 +1,52 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "veto-cli"
+version = "0.1.1"
+description = "Veto CLI — one-command MCP setup for AI agent payment authorization."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { file = "LICENSE" }
+authors = [
+    { name = "Veto", email = "tomer@veto-ai.com" }
+]
+keywords = [
+    "ai-agents",
+    "mcp",
+    "model-context-protocol",
+    "x402",
+    "payments",
+    "authorization",
+    "agent-policy",
+    "claude",
+    "anthropic",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: System :: Systems Administration :: Authentication/Directory",
+]
+dependencies = []
+
+[project.urls]
+Homepage = "https://veto-ai.com"
+Documentation = "https://veto-ai.com/docs"
+Repository = "https://github.com/veto-protocol/veto-cli"
+Issues = "https://github.com/veto-protocol/veto-cli/issues"
+
+[project.scripts]
+veto = "veto_cli.main:main"
+
+[tool.setuptools.packages.find]
+include = ["veto_cli*"]
+exclude = ["tests*", "*.egg-info"]

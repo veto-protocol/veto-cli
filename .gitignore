@@ -1,0 +1,35 @@
+# Build artifacts
+build/
+dist/
+*.egg-info/
+*.egg
+*.whl
+*.tar.gz
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtual envs
+venv/
+.venv/
+env/
+.env
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Local config (user creates this)
+.pypirc
