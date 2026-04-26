@@ -12,29 +12,55 @@ pip install veto-cli
 
 Requires Python 3.9+. No third-party dependencies — stdlib only.
 
-## Quickstart
+## Quickstart — the headline command
 
 ```bash
-# 1. Sign up at https://veto-ai.com to get an API key.
-# 2. Auto-configure your MCP client:
+# Get an API key from https://veto-ai.com, then:
+pip install veto-cli
+
+# Save your API key locally (one-time):
 veto init --api-key veto_test_xxxxxxxxxxxx
 
-# 3. Verify the integration:
-veto test
+# Now any agent — yours, an MCP client, a shell script — can ask Veto
+# whether an action is allowed before doing it:
+veto authorize \
+  --agent <agent-uuid> \
+  --amount 0.05 \
+  --merchant api.anthropic.com \
+  --action payment
+
+# → 0 if approved, 1 if denied, 2 if escalated, 3 on error.
 ```
 
-`veto init` detects which MCP clients you have installed (Claude Desktop, Cursor, etc.) and writes the Veto MCP server into their config. Restart the client and your agent now routes every payment through Veto.
+JSON output for piping into other tools:
+
+```bash
+veto authorize --agent ... --amount 0.05 --merchant ... --action payment --json
+```
+
+Read input from stdin:
+
+```bash
+echo '{"agent_id":"...","amount":0.05,"merchant":"...","action":"payment"}' | veto authorize -
+```
+
+## Why this matters
+
+`veto authorize` returns the *decision* — approve, deny, or escalate — without any side effect. Your agent stays in control of the actual payment / signing / API call; Veto just gatekeeps. That's Mode 1 (decision API).
+
+`veto test` and `veto init`-installed MCP integration also support Mode 2 (Veto creates a Stripe-issued virtual card from your authorized request), but Mode 1 is the headline use case for any agent that already has its own wallet, card, or rails.
 
 ## Commands
 
 | Command | What it does |
 |---|---|
+| `veto authorize` | Ask Veto whether an agent action is allowed (returns approve / deny / escalate). Headline command. |
 | `veto init` | Auto-detect MCP clients on your machine and add Veto to each one's config |
 | `veto status [agent_id]` | Show your agent's current reputation tier and recent decision history |
-| `veto test [agent_id]` | Fire a synthetic test transaction to confirm the integration works |
-| `veto list` | List all agents linked to your Veto account |
+| `veto test [agent_id]` | Fire a synthetic Mode-2 test transaction (creates a real Stripe-issued virtual card) |
+| `veto list` | List installed MCP clients and Veto integration status |
 | `veto uninstall` | Remove Veto from MCP client configs (does not delete your account) |
-| `veto mcp` | Run the Veto MCP server in foreground (for debugging) |
+| `veto mcp` | Run the Veto MCP server in foreground (used by MCP clients) |
 
 ## What Veto evaluates on every authorize call
 

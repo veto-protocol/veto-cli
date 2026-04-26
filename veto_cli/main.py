@@ -2,6 +2,7 @@
 Veto CLI — main entrypoint.
 
 Commands:
+    veto authorize     Ask Veto whether an agent action is allowed (headline command)
     veto init          Auto-configure Veto MCP for installed AI clients
     veto test          Fire a test transaction to verify connection
     veto status        Show reputation + recent transactions
@@ -334,6 +335,149 @@ def cmd_mcp(args):
     mcp_server.main()
 
 
+# Allowed action types — must match Transaction.ActionType in the backend.
+# CLI doesn't enforce these (backend is authoritative); listed in --help for transparency.
+_ALLOWED_ACTIONS = ("payment", "crypto_transfer", "tool_execution")
+
+_STDIN_FIELDS = {"agent_id", "agent", "amount", "merchant", "action", "description", "context"}
+
+
+def _eprint(msg: str = "") -> None:
+    """Print to stderr — used by cmd_authorize so stdout stays machine-readable."""
+    print(msg, file=sys.stderr)
+
+
+def cmd_authorize(args):
+    """
+    Ask Veto whether an agent action is allowed.
+
+    Two input modes:
+      1. Flags:    veto authorize --agent <uuid> --amount 0.05 --merchant ... --action payment
+      2. Stdin:    echo '{"agent_id":"...","amount":0.05,...}' | veto authorize -
+
+    Output:
+      - Default: human-readable with color
+      - --json:  JSON object passed through from the API response
+      - --quiet: silent, exit code only
+
+    Exit codes:
+      0 = approved   1 = denied   2 = escalated   3 = error
+    """
+    state = _load_state()
+    api_key = args.api_key or state.get("api_key")
+    base_url = args.base_url or state.get("base_url", "https://veto-ai.com")
+
+    # Resolve input (stdin vs flags)
+    use_stdin = args.stdin == "-"
+    if use_stdin:
+        try:
+            payload = json.load(sys.stdin)
+            if not isinstance(payload, dict):
+                raise ValueError("stdin must be a JSON object")
+        except (json.JSONDecodeError, ValueError) as e:
+            if args.json:
+                print(json.dumps({"status": "error", "error": f"invalid stdin JSON: {e}"}))
+            elif not args.quiet:
+                _eprint(f"  {C.RED}✗{C.RESET} Invalid JSON on stdin: {e}")
+            sys.exit(3)
+        agent_id = payload.get("agent_id") or payload.get("agent")
+        amount = payload.get("amount")
+        merchant = payload.get("merchant", "")
+        action = payload.get("action")
+        description = payload.get("description", "")
+        context = payload.get("context", "")
+        extra = {k: v for k, v in payload.items() if k not in _STDIN_FIELDS}
+    else:
+        agent_id = args.agent
+        amount = args.amount
+        merchant = args.merchant or ""
+        action = args.action
+        description = args.description or ""
+        context = args.context or ""
+        extra = None
+
+    # Validate
+    missing = []
+    if not api_key:
+        missing.append("API key (run `veto init` or pass --api-key)")
+    if not agent_id:
+        missing.append("--agent / agent_id")
+    if amount is None:
+        missing.append("--amount")
+    if not action:
+        missing.append("--action")
+    if missing:
+        if args.json:
+            print(json.dumps({"status": "error", "error": f"missing: {', '.join(missing)}"}))
+        elif not args.quiet:
+            _eprint(f"  {C.RED}✗{C.RESET} Missing required input: {', '.join(missing)}")
+            _eprint(f"  {C.DIM}Run `veto authorize --help` for usage.{C.RESET}")
+        sys.exit(3)
+
+    # Call API
+    try:
+        r = api.authorize(
+            base_url, api_key, agent_id,
+            amount=amount,
+            merchant=merchant,
+            description=description,
+            context=context,
+            action=action,
+            decision_only=True,
+            extra=extra,
+        )
+    except api.VetoAPIError as e:
+        if args.json:
+            payload = {"status": "error", "error": str(e)}
+            if e.status_code:
+                payload["status_code"] = e.status_code
+            print(json.dumps(payload))
+        elif not args.quiet:
+            _eprint(f"  {C.RED}✗{C.RESET} Request failed: {e}")
+        sys.exit(3)
+
+    status = r.get("status")
+
+    # Human-readable output
+    if args.json:
+        print(json.dumps(r))
+    elif not args.quiet:
+        risk = r.get("risk_score") or 0
+        tx_id = r.get("transaction_id", "")
+        print()
+        if status in ("approved", "executed"):
+            ok(f"{C.BOLD}{C.GREEN}APPROVED{C.RESET} {C.DIM}— risk {risk:.2f}{C.RESET}")
+            if tx_id:
+                info(f"transaction_id: {C.DIM}{tx_id}{C.RESET}")
+        elif status == "denied":
+            err(f"{C.BOLD}DENIED{C.RESET} {C.DIM}— risk {risk:.2f}{C.RESET}")
+            reason = r.get("reason", "")
+            if reason:
+                info(f"reason: {reason}")
+            if tx_id:
+                info(f"transaction_id: {C.DIM}{tx_id}{C.RESET}")
+        elif status == "escalated":
+            warn(f"{C.BOLD}ESCALATED{C.RESET} {C.DIM}— risk {risk:.2f}{C.RESET}")
+            reason = r.get("reason", "Human approval required.")
+            info(reason)
+            info(f"review at {C.DIM}{base_url}/dashboard/{C.RESET}")
+            if tx_id:
+                info(f"transaction_id: {C.DIM}{tx_id}{C.RESET}")
+        else:
+            err(f"Unexpected response status: {status}")
+            info(f"raw: {r}")
+        print()
+
+    # Exit codes
+    if status in ("approved", "executed"):
+        sys.exit(0)
+    if status == "denied":
+        sys.exit(1)
+    if status == "escalated":
+        sys.exit(2)
+    sys.exit(3)
+
+
 # ── Entry point ──
 
 def main():
@@ -345,6 +489,37 @@ def main():
     parser.add_argument("--base-url", help="Veto server URL (default: https://veto-ai.com)")
 
     sub = parser.add_subparsers(dest="command", required=True)
+
+    # Headline command — what agents call before each real action.
+    p_authorize = sub.add_parser(
+        "authorize",
+        help="Ask Veto whether an agent action is allowed (returns approve / deny / escalate)",
+        description=(
+            "Ask Veto whether an agent action is allowed. Returns approve/deny/escalate.\n\n"
+            "Two input modes:\n"
+            "  Flags: veto authorize --agent <uuid> --amount 0.05 --merchant test --action payment\n"
+            "  Stdin: echo '{\"agent_id\":\"...\",\"amount\":0.05,...}' | veto authorize -\n\n"
+            f"Allowed --action values: {', '.join(_ALLOWED_ACTIONS)}\n"
+            "Exit codes: 0=approved, 1=denied, 2=escalated, 3=error"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p_authorize.add_argument("stdin", nargs="?", help="Pass '-' to read JSON object from stdin")
+    p_authorize.add_argument("--agent", help="Agent UUID")
+    p_authorize.add_argument("--amount", type=float, help="Amount (USD or token decimal)")
+    p_authorize.add_argument("--merchant", help="Merchant or counterparty (e.g. 'api.anthropic.com')")
+    p_authorize.add_argument(
+        "--action",
+        help=f"Action type. One of: {', '.join(_ALLOWED_ACTIONS)}",
+    )
+    p_authorize.add_argument("--description", help="Free-text description (optional)")
+    p_authorize.add_argument(
+        "--context",
+        help="Conversation context — used by the engine for intent verification (optional)",
+    )
+    p_authorize.add_argument("--json", action="store_true", help="Output JSON to stdout instead of human-readable")
+    p_authorize.add_argument("--quiet", "-q", action="store_true", help="Silent; exit code only")
+    p_authorize.set_defaults(func=cmd_authorize)
 
     p_init = sub.add_parser("init", help="Auto-configure MCP for installed AI clients")
     p_init.add_argument("--yes", "-y", action="store_true", help="Install into all detected clients without prompting")
