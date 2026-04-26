@@ -47,6 +47,52 @@ def _request(base_url: str, api_key: str, method: str, path: str, body: dict | N
         raise VetoAPIError(f"Connection failed: {e.reason}")
 
 
+def register(
+    base_url: str,
+    email: str,
+    preset: str | None = None,
+    mission: str | None = None,
+    agent_name: str | None = None,
+    org_name: str | None = None,
+) -> dict:
+    """
+    POST /api/v1/register/ — CLI-native signup.
+
+    Creates a User + Client + default AIAgent + SecurityPolicy on the backend
+    and returns {api_key, client_id, agent_id, agent_name, mission, org_name, policy}.
+
+    No auth required (this is the bootstrap endpoint).
+    """
+    body = {"email": email}
+    if preset:
+        body["preset"] = preset
+    if mission:
+        body["mission"] = mission
+    if agent_name:
+        body["agent_name"] = agent_name
+    if org_name:
+        body["org_name"] = org_name
+
+    url = f"{base_url.rstrip('/')}/api/v1/register/"
+    headers = {
+        "Content-Type": "application/json",
+        "User-Agent": f"veto-cli/{__version__}",
+    }
+    data = json.dumps(body).encode()
+    req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return json.loads(resp.read().decode())
+    except urllib.error.HTTPError as e:
+        try:
+            payload = json.loads(e.read().decode())
+        except Exception:
+            raise VetoAPIError(f"HTTP {e.code}: {e.reason}", status_code=e.code)
+        raise VetoAPIError(payload.get("error", f"HTTP {e.code}"), status_code=e.code, body=payload)
+    except urllib.error.URLError as e:
+        raise VetoAPIError(f"Connection failed: {e.reason}")
+
+
 def authorize(
     base_url: str,
     api_key: str,

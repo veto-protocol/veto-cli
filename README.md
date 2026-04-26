@@ -12,25 +12,49 @@ pip install veto-cli
 
 Requires Python 3.9+. No third-party dependencies — stdlib only.
 
-## Quickstart — the headline command
+## Quickstart — three commands
 
 ```bash
-# Get an API key from https://veto-ai.com, then:
+# 1. Install
 pip install veto-cli
 
-# Save your API key locally (one-time):
-veto init --api-key veto_test_xxxxxxxxxxxx
+# 2. Register an account from the terminal (no website, no form)
+veto register --email me@example.com --preset dev
+# → ✓ Welcome to Veto. API key + default agent saved locally.
 
-# Now any agent — yours, an MCP client, a shell script — can ask Veto
-# whether an action is allowed before doing it:
+# 3. Ask Veto whether an action is allowed
+veto authorize --amount 0.05 --merchant api.anthropic.com --action payment
+# → APPROVED / DENIED / ESCALATED. Exit code 0/1/2.
+```
+
+That's it. Three commands, zero web pages, working agent-payment gatekeeping.
+
+## Policy presets
+
+`veto register` applies a policy preset so your agent has sensible limits from the first authorize call. Pick one with `--preset`:
+
+| Preset | For | Defaults |
+|---|---|---|
+| `personal` *(default)* | General-purpose agent | $500/tx, $2k/day, blocks gambling/mixers/adult |
+| `inference` | AI API calls | $5/tx, allowlists Anthropic/OpenAI/Replicate/etc. |
+| `x402-micropay` | x402 testing | $1/tx, Base chain only, auto-approve <$0.10 |
+| `ad-spend` | Meta/Google ads | $1k/tx, escalate >$1k |
+| `dev` | Dogfooding/testing | $500/tx, no merchant restrictions |
+
+Override the agent's mission with `--mission "..."`. Override the agent name with `--agent-name "..."`. Edit policies later with the `veto policies` commands (coming in 0.4.0).
+
+## Headline command — `veto authorize`
+
+```bash
 veto authorize \
-  --agent <agent-uuid> \
   --amount 0.05 \
   --merchant api.anthropic.com \
   --action payment
 
 # → 0 if approved, 1 if denied, 2 if escalated, 3 on error.
 ```
+
+After `veto register`, the default agent UUID is saved locally — you don't need to pass `--agent` on every call.
 
 JSON output for piping into other tools:
 

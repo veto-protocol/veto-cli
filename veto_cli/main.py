@@ -2,8 +2,9 @@
 Veto CLI — main entrypoint.
 
 Commands:
+    veto register      CLI-native signup — get an API key + default agent in one command
     veto authorize     Ask Veto whether an agent action is allowed (headline command)
-    veto init          Auto-configure Veto MCP for installed AI clients
+    veto init          Auto-configure Veto MCP for installed AI clients (post-register)
     veto test          Fire a test transaction to verify connection
     veto status        Show reputation + recent transactions
     veto list          List installed MCP clients with Veto
@@ -339,7 +340,88 @@ def cmd_mcp(args):
 # CLI doesn't enforce these (backend is authoritative); listed in --help for transparency.
 _ALLOWED_ACTIONS = ("payment", "crypto_transfer", "tool_execution")
 
+# Policy presets — must match keys in policies/presets.py POLICY_PRESETS on the backend.
+# CLI doesn't enforce these (backend is authoritative); listed in --help for transparency.
+_ALLOWED_PRESETS = ("personal", "inference", "x402-micropay", "ad-spend", "dev")
+
 _STDIN_FIELDS = {"agent_id", "agent", "amount", "merchant", "action", "description", "context"}
+
+
+def cmd_register(args):
+    """
+    CLI-native signup — POST /api/v1/register/, save API key + default agent UUID locally.
+
+    No web form, no email verification (yet). Just an email and a preset →
+    a working account in one command.
+    """
+    base_url = args.base_url or "https://veto-ai.com"
+
+    # Warn if user already has an API key saved — we'd overwrite ~/.veto/config.json.
+    state = _load_state()
+    if state.get("api_key") and not args.yes:
+        warn(f"You already have an API key saved at {STATE_PATH}.")
+        warn(f"Existing key: {state['api_key'][:24]}...")
+        confirm = _prompt("Overwrite with new account? (y/N)", default="N")
+        if confirm.strip().lower() not in ("y", "yes"):
+            info("Cancelled. Your existing config is unchanged.")
+            sys.exit(0)
+
+    banner()
+    info(f"Registering {args.email} with preset '{args.preset or 'personal'}'...")
+    print()
+
+    try:
+        r = api.register(
+            base_url,
+            email=args.email,
+            preset=args.preset,
+            mission=args.mission,
+            agent_name=args.agent_name,
+            org_name=args.org_name,
+        )
+    except api.VetoAPIError as e:
+        # Errors to stderr so success-path stdout stays clean for piping.
+        _eprint(f"  {C.RED}✗{C.RESET} Registration failed: {e}")
+        if e.status_code == 409:
+            _eprint(f"  {C.DIM}·{C.RESET} Use a different email, or run `veto init --api-key <existing>` if you already have a key.")
+        sys.exit(3)
+
+    # Save state — API key + default agent so subsequent `veto authorize` doesn't need flags.
+    _save_state({
+        "api_key": r["api_key"],
+        "base_url": base_url,
+        "default_agent": r["agent_id"],
+    })
+
+    # Pretty print the account summary.
+    p = r["policy"]
+    print(f"  {C.BOLD}{C.GREEN}✓ Welcome to Veto.{C.RESET}")
+    print()
+    print(f"  {C.DIM}Email:{C.RESET}      {args.email}")
+    print(f"  {C.DIM}Org:{C.RESET}        {r.get('org_name', '')}")
+    print(f"  {C.DIM}Agent:{C.RESET}      {r['agent_name']}  {C.DIM}({r['agent_id']}){C.RESET}")
+    print(f"  {C.DIM}Mission:{C.RESET}    {r['mission']}")
+    print(f"  {C.DIM}Policy:{C.RESET}     {p['name']} preset")
+    print(f"             {C.DIM}max ${p['max_per_tx']}/tx · ${p['daily_limit']}/day · ${p['monthly_limit']}/mo{C.RESET}")
+    if p.get("auto_approve_below"):
+        print(f"             {C.DIM}auto-approve below ${p['auto_approve_below']}{C.RESET}")
+    if p.get("require_human_approval_above"):
+        print(f"             {C.DIM}escalate above ${p['require_human_approval_above']}{C.RESET}")
+    if p.get("merchant_blocklist"):
+        print(f"             {C.DIM}blocks: {', '.join(p['merchant_blocklist'])}{C.RESET}")
+    if p.get("merchant_allowlist"):
+        print(f"             {C.DIM}allows: {', '.join(p['merchant_allowlist'])}{C.RESET}")
+    if p.get("chain_allowlist"):
+        print(f"             {C.DIM}chains: {', '.join(p['chain_allowlist'])}{C.RESET}")
+    print(f"  {C.DIM}API key:{C.RESET}    saved to {STATE_PATH}")
+    print()
+    print(f"  {C.BOLD}Try it:{C.RESET}")
+    print(f"    {C.CYAN}veto authorize --amount 50000 --merchant amazon.com --action payment{C.RESET}")
+    print(f"    {C.DIM}→ should be DENIED (over per-tx cap){C.RESET}")
+    print()
+    print(f"    {C.CYAN}veto authorize --amount 0.05 --merchant api.test.com --action payment{C.RESET}")
+    print(f"    {C.DIM}→ should be APPROVED{C.RESET}")
+    print()
 
 
 def _eprint(msg: str = "") -> None:
@@ -380,7 +462,8 @@ def cmd_authorize(args):
             elif not args.quiet:
                 _eprint(f"  {C.RED}✗{C.RESET} Invalid JSON on stdin: {e}")
             sys.exit(3)
-        agent_id = payload.get("agent_id") or payload.get("agent")
+        # Fall back to default_agent from config when stdin doesn't specify one.
+        agent_id = payload.get("agent_id") or payload.get("agent") or state.get("default_agent")
         amount = payload.get("amount")
         merchant = payload.get("merchant", "")
         action = payload.get("action")
@@ -388,7 +471,9 @@ def cmd_authorize(args):
         context = payload.get("context", "")
         extra = {k: v for k, v in payload.items() if k not in _STDIN_FIELDS}
     else:
-        agent_id = args.agent
+        # `veto register` saves the default agent UUID to ~/.veto/config.json so users
+        # don't have to retype --agent every time. --agent flag still wins if supplied.
+        agent_id = args.agent or state.get("default_agent")
         amount = args.amount
         merchant = args.merchant or ""
         action = args.action
@@ -489,6 +574,31 @@ def main():
     parser.add_argument("--base-url", help="Veto server URL (default: https://veto-ai.com)")
 
     sub = parser.add_subparsers(dest="command", required=True)
+
+    # CLI-native signup — first command a new user runs.
+    p_register = sub.add_parser(
+        "register",
+        help="Register a new Veto account from the CLI (no web required)",
+        description=(
+            "Register a new Veto account. Creates a User + Client + default Agent + Policy\n"
+            "on the backend, saves your API key locally, and prints what you can try next.\n\n"
+            f"Available presets: {', '.join(_ALLOWED_PRESETS)}\n"
+            "  personal       — general-purpose, $500/tx, blocks gambling/mixers/adult\n"
+            "  inference      — AI API calls, $5/tx, allowlists Anthropic/OpenAI/etc.\n"
+            "  x402-micropay  — x402 testing, $1/tx, Base chain only, auto-approve <$0.10\n"
+            "  ad-spend       — Meta/Google ad platforms, $1k/tx, escalate >$1k\n"
+            "  dev            — dogfood/testing, loose limits, no merchant restrictions\n\n"
+            "Example: veto register --email me@example.com --preset dev"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p_register.add_argument("--email", required=True, help="Your email address (account identifier)")
+    p_register.add_argument("--preset", help=f"Policy preset (default: personal). One of: {', '.join(_ALLOWED_PRESETS)}")
+    p_register.add_argument("--mission", help="Custom mission for the default agent (overrides preset's default)")
+    p_register.add_argument("--agent-name", help="Name for the default agent (default: 'default-agent')")
+    p_register.add_argument("--org-name", help="Organization name (default: derived from email)")
+    p_register.add_argument("--yes", "-y", action="store_true", help="Skip confirmation if existing config would be overwritten")
+    p_register.set_defaults(func=cmd_register)
 
     # Headline command — what agents call before each real action.
     p_authorize = sub.add_parser(
