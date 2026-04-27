@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "veto-cli"
-version = "0.3.0"
+version = "0.5.0"
 description = "Veto CLI — one-command MCP setup for AI agent payment authorization."
 readme = "README.md"
 requires-python = ">=3.9"
@@ -36,7 +36,12 @@ classifiers = [
     "Topic :: Software Development :: Libraries :: Python Modules",
     "Topic :: System :: Systems Administration :: Authentication/Directory",
 ]
-dependencies = []
+dependencies = [
+    # PyYAML powers `veto policy export/push/show` — YAML is the policy authoring format.
+    "PyYAML>=6.0",
+    # cryptography powers `veto verify` — Ed25519 signature check on signed receipts.
+    "cryptography>=41.0",
+]
 
 [project.urls]
 Homepage = "https://veto-ai.com"

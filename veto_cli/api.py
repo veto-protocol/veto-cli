@@ -156,3 +156,73 @@ def verify_key(base_url: str, api_key: str) -> bool:
         return True
     except VetoAPIError:
         return False
+
+
+# ---------------------------------------------------------------------------
+# Policy authoring — back `veto policy export/push/show/check/activate`.
+# Wire format is JSON; CLI converts YAML <-> dict via PyYAML.
+# ---------------------------------------------------------------------------
+
+def policy_export_preset(base_url: str, preset_name: str) -> dict:
+    """GET /api/v1/policies/presets/<name>/ — public, no auth."""
+    url = f"{base_url.rstrip('/')}/api/v1/policies/presets/{preset_name}/"
+    headers = {"User-Agent": f"veto-cli/{__version__}"}
+    req = urllib.request.Request(url, headers=headers, method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return json.loads(resp.read().decode())
+    except urllib.error.HTTPError as e:
+        try:
+            payload = json.loads(e.read().decode())
+        except Exception:
+            raise VetoAPIError(f"HTTP {e.code}: {e.reason}", status_code=e.code)
+        raise VetoAPIError(payload.get("error", f"HTTP {e.code}"), status_code=e.code, body=payload)
+    except urllib.error.URLError as e:
+        raise VetoAPIError(f"Connection failed: {e.reason}")
+
+
+def policy_push(base_url: str, api_key: str, policy: dict) -> dict:
+    """POST /api/v1/policies/ — push a new version. Auto-activates."""
+    return _request(base_url, api_key, "POST", "/api/v1/policies/", policy)
+
+
+def policy_show_active(base_url: str, api_key: str) -> dict:
+    """GET /api/v1/policies/active/ — current active policy as canonical dict."""
+    return _request(base_url, api_key, "GET", "/api/v1/policies/active/")
+
+
+def policy_list(base_url: str, api_key: str) -> dict:
+    """GET /api/v1/policies/ — all this client's versions, newest first."""
+    return _request(base_url, api_key, "GET", "/api/v1/policies/")
+
+
+def policy_check(
+    base_url: str,
+    api_key: str,
+    agent_id: str,
+    action: str,
+    amount: float | None = None,
+    merchant: str = "",
+    description: str = "",
+    context: str = "",
+    extra: dict | None = None,
+) -> dict:
+    """POST /api/v1/policies/check/ — dry-run an action. No Transaction is persisted."""
+    body = {
+        "agent_id": agent_id,
+        "action": action,
+        "amount": amount,
+        "merchant": merchant,
+        "description": description,
+        "context": context,
+    }
+    if extra:
+        for k, v in extra.items():
+            if k not in body or body[k] in (None, ""):
+                body[k] = v
+    return _request(base_url, api_key, "POST", "/api/v1/policies/check/", body)
+
+
+def policy_activate(base_url: str, api_key: str, policy_id: str) -> dict:
+    """POST /api/v1/policies/<id>/activate/ — roll back to / activate a specific version."""
+    return _request(base_url, api_key, "POST", f"/api/v1/policies/{policy_id}/activate/")

@@ -4,6 +4,8 @@ Veto CLI — main entrypoint.
 Commands:
     veto register      CLI-native signup — get an API key + default agent in one command
     veto authorize     Ask Veto whether an agent action is allowed (headline command)
+    veto verify        Verify a Veto signed decision receipt (offline, via JWKS)
+    veto policy        Author / inspect / dry-run security policies (YAML)
     veto init          Auto-configure Veto MCP for installed AI clients (post-register)
     veto test          Fire a test transaction to verify connection
     veto status        Show reputation + recent transactions
@@ -429,6 +431,16 @@ def _eprint(msg: str = "") -> None:
     print(msg, file=sys.stderr)
 
 
+def _eerr(msg: str) -> None:
+    """Stderr-equivalent of err() — keeps stdout clean for `veto policy show > file`."""
+    print(f"  {C.RED}✗{C.RESET} {msg}", file=sys.stderr)
+
+
+def _einfo(msg: str) -> None:
+    """Stderr-equivalent of info() — used for context lines that follow _eerr()."""
+    print(f"  {C.DIM}·{C.RESET} {msg}", file=sys.stderr)
+
+
 def cmd_authorize(args):
     """
     Ask Veto whether an agent action is allowed.
@@ -563,6 +575,333 @@ def cmd_authorize(args):
     sys.exit(3)
 
 
+# ── Verify command — offline JWS receipt validation via JWKS ──
+
+def cmd_verify(args):
+    """
+    `veto verify <receipt>` — fetch JWKS, validate Ed25519 signature, print payload.
+
+    Receipt can be passed as a positional arg or via stdin (use '-').
+
+    Exit codes:
+        0 = valid signature, payload printed
+        1 = invalid signature (key found but didn't verify)
+        2 = malformed receipt OR JWKS fetch failed
+        3 = input error (bad stdin, etc.)
+    """
+    from veto_cli import receipts as rcpt
+
+    state = _load_state()
+    base_url = args.base_url or state.get("base_url", "https://veto-ai.com")
+
+    raw = args.receipt
+    if raw == "-":
+        raw = sys.stdin.read().strip()
+    if not raw:
+        if args.json:
+            print(json.dumps({"valid": False, "error": "missing receipt input"}))
+        else:
+            _eerr("Receipt input is empty.")
+        sys.exit(3)
+
+    try:
+        payload = rcpt.verify_receipt(raw, base_url, no_cache=args.no_cache)
+    except rcpt.MalformedReceipt as e:
+        if args.json:
+            print(json.dumps({"valid": False, "error": f"malformed: {e}"}))
+        elif not args.quiet:
+            _eerr(f"Malformed receipt: {e}")
+        sys.exit(2)
+    except rcpt.KeyFetchError as e:
+        if args.json:
+            print(json.dumps({"valid": False, "error": f"jwks: {e}"}))
+        elif not args.quiet:
+            _eerr(f"JWKS fetch failed: {e}")
+            _einfo(f"Tried: {base_url}/.well-known/jwks.json")
+        sys.exit(2)
+    except rcpt.InvalidReceipt as e:
+        # Try to surface the (untrusted) payload claims so the user sees what was
+        # being claimed by the bad receipt — useful for debugging.
+        try:
+            _, untrusted_payload, _, _ = rcpt.parse_receipt_unsafe(raw)
+        except Exception:
+            untrusted_payload = {}
+        if args.json:
+            print(json.dumps({
+                "valid": False,
+                "error": str(e),
+                "untrusted_payload": untrusted_payload,
+            }))
+        elif not args.quiet:
+            _eerr(f"{C.BOLD}INVALID RECEIPT{C.RESET} — {e}")
+        sys.exit(1)
+
+    # Valid — render the verified payload
+    if args.json:
+        print(json.dumps({"valid": True, "payload": payload}))
+    elif not args.quiet:
+        decision = payload.get("decision", "?")
+        decision_color = {
+            "approve": C.GREEN,
+            "deny": C.RED,
+            "escalate": C.YELLOW,
+        }.get(decision, C.DIM)
+        print()
+        ok(f"{C.BOLD}{C.GREEN}VERIFIED{C.RESET} {C.DIM}— Ed25519 / {payload.get('engine_version', '?')}{C.RESET}")
+        print()
+        print(f"  {C.DIM}decision:{C.RESET}        {decision_color}{C.BOLD}{decision.upper()}{C.RESET}")
+        print(f"  {C.DIM}risk_score:{C.RESET}      {payload.get('risk_score', '?')}")
+        if payload.get("reason_codes"):
+            print(f"  {C.DIM}reason_codes:{C.RESET}    {', '.join(payload['reason_codes'])}")
+        if payload.get("policy"):
+            p = payload["policy"]
+            print(f"  {C.DIM}policy:{C.RESET}          {p.get('name', '')} v{p.get('version_number', '?')}")
+            print(f"  {C.DIM}policy_id:{C.RESET}       {C.DIM}{p.get('id', '')}{C.RESET}")
+        print(f"  {C.DIM}transaction_id:{C.RESET}  {C.DIM}{payload.get('sub', '')}{C.RESET}")
+        print(f"  {C.DIM}agent_id:{C.RESET}        {C.DIM}{payload.get('agent_id', '')}{C.RESET}")
+        print(f"  {C.DIM}fingerprint:{C.RESET}     {C.DIM}{payload.get('input_fingerprint', '')[:32]}…{C.RESET}")
+        if payload.get("iat"):
+            from datetime import datetime, timezone
+            iat = datetime.fromtimestamp(payload["iat"], tz=timezone.utc)
+            print(f"  {C.DIM}signed_at:{C.RESET}       {iat.isoformat()}")
+        print()
+    sys.exit(0)
+
+
+# ── Policy commands ──
+
+def _require_yaml():
+    """Import PyYAML lazily so tests / unrelated commands don't hard-fail without it."""
+    try:
+        import yaml  # type: ignore
+        return yaml
+    except ImportError:
+        _eerr("PyYAML is required for `veto policy` commands. Install with: pip install pyyaml")
+        sys.exit(3)
+
+
+def _strip_meta(d: dict) -> dict:
+    """Drop the read-only _meta block before sending a policy back to the server."""
+    return {k: v for k, v in d.items() if k != "_meta"}
+
+
+def _print_yaml(data: dict):
+    """Emit YAML to stdout. Block style, sorted keys preserved as inserted."""
+    yaml = _require_yaml()
+    sys.stdout.write(
+        yaml.dump(data, default_flow_style=False, sort_keys=False, allow_unicode=True)
+    )
+
+
+def cmd_policy_export(args):
+    """`veto policy export <preset>` — fetch a preset and print as YAML."""
+    base_url = args.base_url or _load_state().get("base_url", "https://veto-ai.com")
+    try:
+        data = api.policy_export_preset(base_url, args.preset)
+    except api.VetoAPIError as e:
+        _eerr(f"Could not fetch preset: {e}")
+        if e.status_code == 404:
+            _einfo("Run `veto policy export --list` to see available presets.")
+        sys.exit(3)
+    _print_yaml(data)
+
+
+def cmd_policy_push(args):
+    """`veto policy push <file>` — read YAML, send to backend, print version info."""
+    state = _load_state()
+    api_key = args.api_key or state.get("api_key")
+    base_url = args.base_url or state.get("base_url", "https://veto-ai.com")
+    if not api_key:
+        _eerr("No API key. Run `veto register` or `veto init` first.")
+        sys.exit(3)
+
+    if not os.path.isfile(args.file):
+        _eerr(f"File not found: {args.file}")
+        sys.exit(3)
+
+    yaml = _require_yaml()
+    try:
+        with open(args.file) as f:
+            payload = yaml.safe_load(f)
+    except yaml.YAMLError as e:
+        _eerr(f"YAML parse error in {args.file}: {e}")
+        sys.exit(3)
+
+    if not isinstance(payload, dict):
+        _eerr(f"Policy file must contain a YAML object (got {type(payload).__name__}).")
+        sys.exit(3)
+
+    payload = _strip_meta(payload)
+
+    try:
+        r = api.policy_push(base_url, api_key, payload)
+    except api.VetoAPIError as e:
+        _eerr(f"Push failed: {e}")
+        if e.body and e.body.get("field"):
+            _einfo(f"field: {e.body['field']}")
+        sys.exit(3)
+
+    print()
+    ok(f"{C.BOLD}Policy v{r['version_number']} pushed{C.RESET} {C.DIM}— now active{C.RESET}")
+    info(f"name:       {r['name']}")
+    info(f"scope:      {r['scope']}")
+    if r.get("agent_id"):
+        info(f"agent_id:   {r['agent_id']}")
+    info(f"policy_id:  {C.DIM}{r['policy_id']}{C.RESET}")
+    print()
+    info(f"Roll back with:  {C.CYAN}veto policy activate <prior-policy_id>{C.RESET}")
+    print()
+
+
+def cmd_policy_show(args):
+    """`veto policy show` — fetch the active policy and print as YAML."""
+    state = _load_state()
+    api_key = args.api_key or state.get("api_key")
+    base_url = args.base_url or state.get("base_url", "https://veto-ai.com")
+    if not api_key:
+        _eerr("No API key. Run `veto register` or `veto init` first.")
+        sys.exit(3)
+
+    try:
+        data = api.policy_show_active(base_url, api_key)
+    except api.VetoAPIError as e:
+        _eerr(f"Could not fetch active policy: {e}")
+        sys.exit(3)
+
+    _print_yaml(data)
+
+
+def cmd_policy_list(args):
+    """`veto policy list` — show all versions for this client, newest first."""
+    state = _load_state()
+    api_key = args.api_key or state.get("api_key")
+    base_url = args.base_url or state.get("base_url", "https://veto-ai.com")
+    if not api_key:
+        _eerr("No API key. Run `veto register` or `veto init` first.")
+        sys.exit(3)
+
+    try:
+        r = api.policy_list(base_url, api_key)
+    except api.VetoAPIError as e:
+        _eerr(f"List failed: {e}")
+        sys.exit(3)
+
+    policies = r.get("policies", [])
+    if not policies:
+        info("No policies yet. Push one with `veto policy push <file>`.")
+        return
+
+    print()
+    print(f"  {C.BOLD}Policy versions:{C.RESET}")
+    print()
+    for p in policies:
+        marker = f"{C.GREEN}●{C.RESET}" if p["is_active"] else f"{C.DIM}·{C.RESET}"
+        active_label = f"{C.GREEN}active{C.RESET}" if p["is_active"] else f"{C.DIM}inactive{C.RESET}"
+        print(
+            f"  {marker} v{p['version_number']:<3}  {p['name']:30s}  "
+            f"{active_label}  {C.DIM}{p['policy_id']}{C.RESET}"
+        )
+    print()
+
+
+def cmd_policy_check(args):
+    """`veto policy check '<json>'` — dry-run an action against the active policy."""
+    state = _load_state()
+    api_key = args.api_key or state.get("api_key")
+    base_url = args.base_url or state.get("base_url", "https://veto-ai.com")
+    if not api_key:
+        _eerr("No API key. Run `veto register` or `veto init` first.")
+        sys.exit(3)
+
+    # action JSON via positional arg or stdin
+    raw = args.action_json
+    if raw == "-":
+        raw = sys.stdin.read()
+    try:
+        payload = json.loads(raw) if raw else {}
+    except json.JSONDecodeError as e:
+        _eerr(f"Invalid JSON: {e}")
+        sys.exit(3)
+
+    agent_id = payload.get("agent_id") or payload.get("agent") or state.get("default_agent")
+    action = payload.get("action") or "payment"
+    if not agent_id:
+        _eerr("agent_id required (set --agent or include 'agent_id' in JSON, or run `veto register` first).")
+        sys.exit(3)
+
+    extra = {k: v for k, v in payload.items() if k not in {
+        "agent_id", "agent", "amount", "merchant", "action", "description", "context"
+    }}
+
+    try:
+        r = api.policy_check(
+            base_url, api_key, agent_id,
+            action=action,
+            amount=payload.get("amount"),
+            merchant=payload.get("merchant", ""),
+            description=payload.get("description", ""),
+            context=payload.get("context", ""),
+            extra=extra,
+        )
+    except api.VetoAPIError as e:
+        _eerr(f"Check failed: {e}")
+        sys.exit(3)
+
+    if args.json:
+        print(json.dumps(r))
+        return
+
+    decision = r.get("decision", "?")
+    risk = r.get("risk_score", 0) or 0
+    reason = r.get("denial_reason", "")
+    pol = r.get("policy") or {}
+
+    print()
+    if decision == "approve":
+        ok(f"{C.BOLD}{C.GREEN}WOULD APPROVE{C.RESET} {C.DIM}— risk {risk:.2f}, dry-run{C.RESET}")
+    elif decision == "deny":
+        err(f"{C.BOLD}WOULD DENY{C.RESET} {C.DIM}— risk {risk:.2f}, dry-run{C.RESET}")
+        if reason:
+            info(f"reason: {reason}")
+    elif decision == "escalate":
+        warn(f"{C.BOLD}WOULD ESCALATE{C.RESET} {C.DIM}— risk {risk:.2f}, dry-run{C.RESET}")
+        if reason:
+            info(reason)
+    else:
+        info(f"decision: {decision}")
+
+    if pol:
+        info(f"policy:  {pol.get('name', '')} v{pol.get('version_number', '?')}")
+    signals = [s for s in r.get("signals", []) if s.get("score", 0) > 0]
+    if signals and args.verbose:
+        print()
+        print(f"  {C.DIM}signals:{C.RESET}")
+        for s in signals[:10]:
+            print(f"    {C.DIM}· {s['name']:25s} {s['score']:.2f}  {s.get('reason', '')[:80]}{C.RESET}")
+    print()
+
+
+def cmd_policy_activate(args):
+    """`veto policy activate <policy_id>` — roll back to / activate a specific version."""
+    state = _load_state()
+    api_key = args.api_key or state.get("api_key")
+    base_url = args.base_url or state.get("base_url", "https://veto-ai.com")
+    if not api_key:
+        _eerr("No API key. Run `veto register` or `veto init` first.")
+        sys.exit(3)
+
+    try:
+        r = api.policy_activate(base_url, api_key, args.policy_id)
+    except api.VetoAPIError as e:
+        _eerr(f"Activate failed: {e}")
+        sys.exit(3)
+
+    print()
+    ok(f"{C.BOLD}Activated v{r['version_number']}{C.RESET} {C.DIM}— {r['name']}{C.RESET}")
+    info(f"policy_id: {C.DIM}{r['policy_id']}{C.RESET}")
+    print()
+
+
 # ── Entry point ──
 
 def main():
@@ -630,6 +969,81 @@ def main():
     p_authorize.add_argument("--json", action="store_true", help="Output JSON to stdout instead of human-readable")
     p_authorize.add_argument("--quiet", "-q", action="store_true", help="Silent; exit code only")
     p_authorize.set_defaults(func=cmd_authorize)
+
+    # Verify a Veto signed receipt — offline, via the issuer's JWKS endpoint.
+    p_verify = sub.add_parser(
+        "verify",
+        help="Verify a Veto signed decision receipt (offline, via JWKS)",
+        description=(
+            "Verify a Veto signed decision receipt against the issuer's JWKS endpoint.\n\n"
+            "Receipts are JWS-compact strings (Ed25519). The CLI fetches the public key from\n"
+            "<base_url>/.well-known/jwks.json (cached for 1h), validates the signature, and\n"
+            "prints the decoded payload.\n\n"
+            "Examples:\n"
+            "  veto verify <receipt-string>\n"
+            "  echo '<receipt>' | veto verify -\n"
+            "  veto verify <receipt> --json\n\n"
+            "Exit codes:\n"
+            "  0 = valid signature\n"
+            "  1 = invalid signature\n"
+            "  2 = malformed receipt or JWKS fetch failed\n"
+            "  3 = input error"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p_verify.add_argument("receipt", help="JWS-compact receipt string, or '-' to read from stdin")
+    p_verify.add_argument("--json", action="store_true", help="Print {valid, payload} as JSON")
+    p_verify.add_argument("--quiet", "-q", action="store_true", help="Silent; exit code only")
+    p_verify.add_argument("--no-cache", action="store_true", help="Force a fresh JWKS fetch")
+    p_verify.set_defaults(func=cmd_verify)
+
+    # Policy authoring — YAML in, YAML out, versioned + revertible.
+    p_policy = sub.add_parser(
+        "policy",
+        help="Author / inspect / dry-run security policies (YAML)",
+        description=(
+            "Author and manage security policies in YAML.\n\n"
+            "Subcommands:\n"
+            "  export <preset>          Print a preset as YAML (use as a starting template)\n"
+            "  push <file>              Push a YAML file as a new policy version (auto-activates)\n"
+            "  show                     Print the current active policy as YAML\n"
+            "  list                     List all versions of policies for this client\n"
+            "  check '<json-action>'    Dry-run an action against the active policy\n"
+            "  activate <policy_id>     Roll back to / activate a specific policy version"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    psub = p_policy.add_subparsers(dest="policy_action", required=True)
+
+    p_export = psub.add_parser("export", help="Print a preset as YAML")
+    p_export.add_argument("preset", help=f"One of: {', '.join(_ALLOWED_PRESETS)}")
+    p_export.set_defaults(func=cmd_policy_export)
+
+    p_push = psub.add_parser("push", help="Push a YAML file as a new policy version")
+    p_push.add_argument("file", help="Path to YAML policy file")
+    p_push.set_defaults(func=cmd_policy_push)
+
+    p_show = psub.add_parser("show", help="Print the active policy as YAML")
+    p_show.set_defaults(func=cmd_policy_show)
+
+    p_plist = psub.add_parser("list", help="List all policy versions")
+    p_plist.set_defaults(func=cmd_policy_list)
+
+    p_check = psub.add_parser(
+        "check",
+        help="Dry-run an action against the active policy (no transaction recorded)",
+    )
+    p_check.add_argument(
+        "action_json",
+        help="JSON action object, or '-' to read from stdin",
+    )
+    p_check.add_argument("--json", action="store_true", help="Output the full check response as JSON")
+    p_check.add_argument("--verbose", "-v", action="store_true", help="Show signal details")
+    p_check.set_defaults(func=cmd_policy_check)
+
+    p_activate = psub.add_parser("activate", help="Activate a specific policy version")
+    p_activate.add_argument("policy_id", help="UUID of the policy version to activate")
+    p_activate.set_defaults(func=cmd_policy_activate)
 
     p_init = sub.add_parser("init", help="Auto-configure MCP for installed AI clients")
     p_init.add_argument("--yes", "-y", action="store_true", help="Install into all detected clients without prompting")

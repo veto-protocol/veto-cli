@@ -119,6 +119,59 @@ TOOLS = [
             "required": ["agent_id"],
         },
     },
+    {
+        "name": "veto_policy_show",
+        "description": (
+            "Return the agent owner's currently-active Veto security policy as JSON. "
+            "Use this to introspect what limits, allowlists, and approval thresholds apply "
+            "before attempting an action — so you can plan within bounds instead of "
+            "discovering them by being denied. Includes per-tx / daily / monthly caps, "
+            "merchant allowlist + blocklist, chain allowlist, approval thresholds, and "
+            "the policy version_number that receipts will cite."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+    },
+    {
+        "name": "veto_policy_check",
+        "description": (
+            "Dry-run a proposed action against the active policy WITHOUT recording a "
+            "transaction or producing side effects. Returns {decision, risk_score, "
+            "reason_codes, signals, policy}. Use this for pre-flight: an agent calls "
+            "policy_check, sees the action would be denied with reason_code "
+            "MERCHANT_NOT_ALLOWLISTED, and asks the user to update the allowlist before "
+            "wasting work. veto_authorize is the real call; this is the cheap preview."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "agent_id": {"type": "string", "description": "Your registered agent UUID in Veto"},
+                "action": {
+                    "type": "string",
+                    "enum": ["payment", "crypto_transfer", "tool_execution"],
+                    "description": "Action type — same values as veto_authorize",
+                },
+                "amount": {"type": "number", "description": "Transaction amount in the given currency"},
+                "currency": {"type": "string", "description": "ISO currency code", "default": "USD"},
+                "merchant": {"type": "string", "description": "Who the payment would go to"},
+                "description": {"type": "string", "description": "What this transaction is for"},
+                "context": {"type": "string", "description": "The original user request that led to this action"},
+                "chain": {
+                    "type": "string",
+                    "description": "Blockchain (only for crypto_transfer): base, ethereum, polygon, etc.",
+                },
+                "to_address": {"type": "string", "description": "Destination address (only for crypto_transfer)"},
+                "token_contract": {
+                    "type": "string",
+                    "description": "ERC-20/SPL contract address (only for crypto_transfer)",
+                },
+            },
+            "required": ["agent_id", "action"],
+        },
+    },
 ]
 
 
@@ -149,6 +202,24 @@ def handle_tool_call(tool_name: str, arguments: dict, base_url: str, api_key: st
         return _http(base_url, api_key, "GET", f"/api/v1/transactions/{arguments['transaction_id']}/")
     elif tool_name == "veto_reputation":
         return _http(base_url, api_key, "GET", f"/api/v1/public/reputation/{arguments['agent_id']}/")
+    elif tool_name == "veto_policy_show":
+        return _http(base_url, api_key, "GET", "/api/v1/policies/active/")
+    elif tool_name == "veto_policy_check":
+        body = {
+            "agent_id": arguments["agent_id"],
+            "action": arguments["action"],
+            "amount": arguments.get("amount"),
+            "currency": arguments.get("currency", "USD"),
+            "merchant": arguments.get("merchant", ""),
+            "description": arguments.get("description", ""),
+            "context": arguments.get("context", ""),
+        }
+        # Pass through crypto-specific fields when present so check evaluates
+        # against the same engine pipeline as a real authorize would.
+        for k in ("chain", "to_address", "token_contract", "amount_wei"):
+            if arguments.get(k):
+                body[k] = arguments[k]
+        return _http(base_url, api_key, "POST", "/api/v1/policies/check/", body)
     return {"error": f"Unknown tool: {tool_name}"}
 
 
