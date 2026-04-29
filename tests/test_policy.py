@@ -140,6 +140,38 @@ class TestPolicyPush(unittest.TestCase):
         self.assertEqual(sent["name"], "AI Inference")
         self.assertIn("v4 pushed", out)
 
+    @patch.object(api_module, "policy_push", return_value=_PUSH_RESPONSE)
+    def test_push_strips_meta_round_trip_with_active_policy_meta(self, mock_push):
+        """Round-trip safety: someone runs `veto policy show > p.yaml`, edits, then
+        `veto policy push p.yaml`. The active-policy _meta block (policy_id,
+        version_number, is_active, created_at) is read-only — must never be
+        sent back to the server (would create version_number conflicts).
+        """
+        active_with_meta = {
+            "version": 1,
+            "name": "Custom",
+            "scope": "agent",
+            "max_per_transaction": "5.00",
+            "daily_limit": "50.00",
+            "monthly_limit": "500.00",
+            "merchant_allowlist": [],
+            "merchant_blocklist": [],
+            "_meta": {
+                "policy_id": "11111111-1111-1111-1111-111111111111",
+                "version_number": 7,
+                "is_active": True,
+                "created_at": "2026-04-29T10:00:00+00:00",
+            },
+        }
+        path = self._write_yaml(active_with_meta)
+        code, _out, _ = _run_cli(["policy", "push", path])
+        self.assertEqual(code, 0)
+        sent = mock_push.call_args.args[2]
+        self.assertNotIn("_meta", sent)
+        # And none of the read-only fields leaked into the top level either
+        for read_only_field in ("policy_id", "version_number", "is_active", "created_at"):
+            self.assertNotIn(read_only_field, sent)
+
     def test_push_missing_file_exits_3(self):
         code, _out, err = _run_cli(["policy", "push", "/tmp/does-not-exist-12345.yaml"])
         self.assertEqual(code, 3)
@@ -222,6 +254,7 @@ class TestPolicyCheck(unittest.TestCase):
         "decision": "approve",
         "risk_score": 0.1,
         "denial_reason": "",
+        "reason_codes": [],
         "signals": [],
         "policy": {"policy_id": "p1", "version_number": 2, "name": "Custom"},
         "dry_run": True,
@@ -231,6 +264,7 @@ class TestPolicyCheck(unittest.TestCase):
         "decision": "deny",
         "risk_score": 1.0,
         "denial_reason": "Amount exceeds per-tx limit",
+        "reason_codes": ["AMOUNT_CAP_EXCEEDED", "MERCHANT_NOT_ALLOWLISTED"],
         "signals": [{"name": "over_tx_limit", "score": 1.0, "reason": "..."}],
         "policy": {"policy_id": "p1", "version_number": 2, "name": "Custom"},
         "dry_run": True,
@@ -243,6 +277,19 @@ class TestPolicyCheck(unittest.TestCase):
         code, out, _ = _run_cli(["policy", "check", action])
         self.assertEqual(code, 0)
         self.assertIn("WOULD APPROVE", out)
+
+    @patch.object(api_module, "policy_check")
+    def test_check_deny_surfaces_reason_codes(self, mock_check):
+        """Regression: CLI now surfaces reason_codes in human output for dry-runs,
+        matching the shape of `veto authorize --json`."""
+        mock_check.return_value = self._CHECK_DENY
+        action = json.dumps({"action": "payment", "amount": 50000, "merchant": "amazon.com"})
+        code, out, _ = _run_cli(["policy", "check", action])
+        self.assertEqual(code, 0)
+        self.assertIn("WOULD DENY", out)
+        # Both canonical reason codes appear in output, not just the prose denial_reason
+        self.assertIn("AMOUNT_CAP_EXCEEDED", out)
+        self.assertIn("MERCHANT_NOT_ALLOWLISTED", out)
 
     @patch.object(api_module, "policy_check")
     def test_check_deny_prints_would_deny_with_reason(self, mock_check):

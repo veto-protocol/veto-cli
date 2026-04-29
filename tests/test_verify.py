@@ -215,6 +215,25 @@ class VerifyCliTest(unittest.TestCase):
         self.assertIn("AMOUNT_CAP_EXCEEDED", out)
         self.assertIn("Custom v3", out)
 
+    def test_verify_human_readable_shows_decision_layer(self):
+        """Regression: decision_layer is the field that disambiguates Veto's
+        operator_policy receipts from AP2/Verifiable Intent user-mandate
+        credentials. Must be visible in human output, not silently dropped."""
+        receipt = self._good_receipt(decision_layer="operator_policy")
+        with patch.object(rcpt, "fetch_jwks", return_value=_jwks_doc(self.pub_bytes)):
+            code, out, _ = _run_cli(["verify", receipt])
+        self.assertEqual(code, 0)
+        self.assertIn("decision_layer", out)
+        self.assertIn("operator_policy", out)
+
+    def test_verify_human_readable_shows_mandate_ref_when_present(self):
+        receipt = self._good_receipt(mandate_ref="ap2:mandate:abc123")
+        with patch.object(rcpt, "fetch_jwks", return_value=_jwks_doc(self.pub_bytes)):
+            code, out, _ = _run_cli(["verify", receipt])
+        self.assertEqual(code, 0)
+        self.assertIn("mandate_ref", out)
+        self.assertIn("ap2:mandate:abc123", out)
+
     def test_verify_stdin_input(self):
         receipt = self._good_receipt(decision="approve", reason_codes=[])
         with patch.object(rcpt, "fetch_jwks", return_value=_jwks_doc(self.pub_bytes)):

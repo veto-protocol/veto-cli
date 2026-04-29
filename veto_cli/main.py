@@ -650,6 +650,14 @@ def cmd_verify(args):
         ok(f"{C.BOLD}{C.GREEN}VERIFIED{C.RESET} {C.DIM}— Ed25519 / {payload.get('engine_version', '?')}{C.RESET}")
         print()
         print(f"  {C.DIM}decision:{C.RESET}        {decision_color}{C.BOLD}{decision.upper()}{C.RESET}")
+        # decision_layer disambiguates Veto's operator_policy receipts from
+        # user-authorization credentials (AP2 / Verifiable Intent) when both
+        # are present on a transaction. Surface it so downstream verifiers
+        # know which layer this attestation belongs to.
+        if payload.get("decision_layer"):
+            print(f"  {C.DIM}decision_layer:{C.RESET}  {payload['decision_layer']}")
+        if payload.get("mandate_ref"):
+            print(f"  {C.DIM}mandate_ref:{C.RESET}     {payload['mandate_ref']}")
         print(f"  {C.DIM}risk_score:{C.RESET}      {payload.get('risk_score', '?')}")
         if payload.get("reason_codes"):
             print(f"  {C.DIM}reason_codes:{C.RESET}    {', '.join(payload['reason_codes'])}")
@@ -870,6 +878,12 @@ def cmd_policy_check(args):
     else:
         info(f"decision: {decision}")
 
+    # Surface canonical reason_codes when the server provided them. Same shape
+    # as `veto authorize --json` so dry-run and real-decision outputs match.
+    reason_codes = r.get("reason_codes") or []
+    if reason_codes:
+        info(f"reason_codes: {C.BOLD}{', '.join(reason_codes)}{C.RESET}")
+
     if pol:
         info(f"policy:  {pol.get('name', '')} v{pol.get('version_number', '?')}")
     signals = [s for s in r.get("signals", []) if s.get("score", 0) > 0]
@@ -945,11 +959,22 @@ def main():
         help="Ask Veto whether an agent action is allowed (returns approve / deny / escalate)",
         description=(
             "Ask Veto whether an agent action is allowed. Returns approve/deny/escalate.\n\n"
+            "MODE: This command is Mode-1 only. It always sends decision_only=true to\n"
+            "the backend, so the engine evaluates and returns a signed receipt but does\n"
+            "NOT execute any side effect (no Stripe card issued, no on-chain co-sign,\n"
+            "no MCP forward). For Mode-2 (executor side effects) hit /api/v1/authorize/\n"
+            "directly with decision_only:false.\n\n"
             "Two input modes:\n"
             "  Flags: veto authorize --agent <uuid> --amount 0.05 --merchant test --action payment\n"
             "  Stdin: echo '{\"agent_id\":\"...\",\"amount\":0.05,...}' | veto authorize -\n\n"
-            f"Allowed --action values: {', '.join(_ALLOWED_ACTIONS)}\n"
-            "Exit codes: 0=approved, 1=denied, 2=escalated, 3=error"
+            f"Allowed --action values: {', '.join(_ALLOWED_ACTIONS)}\n\n"
+            "Exit codes (deliberately distinct so shell scripts can branch on intent):\n"
+            "  0  approved      — engine said yes, signed receipt issued\n"
+            "  1  denied        — engine said no, signed receipt issued (deny is also evidence)\n"
+            "  2  escalated     — needs human review, signed receipt issued\n"
+            "  3  error         — input invalid / network failure / unparseable response\n\n"
+            "Approved/denied/escalated are all *signed answers*. Code 3 is the only\n"
+            "outcome where you should NOT trust a receipt-shaped field."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
