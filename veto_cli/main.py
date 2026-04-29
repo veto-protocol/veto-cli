@@ -665,6 +665,8 @@ def cmd_verify(args):
             p = payload["policy"]
             print(f"  {C.DIM}policy:{C.RESET}          {p.get('name', '')} v{p.get('version_number', '?')}")
             print(f"  {C.DIM}policy_id:{C.RESET}       {C.DIM}{p.get('id', '')}{C.RESET}")
+            if p.get("hash"):
+                print(f"  {C.DIM}policy_hash:{C.RESET}     {C.DIM}{p['hash'][:32]}…{C.RESET}")
         print(f"  {C.DIM}transaction_id:{C.RESET}  {C.DIM}{payload.get('sub', '')}{C.RESET}")
         print(f"  {C.DIM}agent_id:{C.RESET}        {C.DIM}{payload.get('agent_id', '')}{C.RESET}")
         print(f"  {C.DIM}fingerprint:{C.RESET}     {C.DIM}{payload.get('input_fingerprint', '')[:32]}…{C.RESET}")
