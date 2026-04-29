@@ -21,6 +21,14 @@ class VetoAPIError(Exception):
         self.body = body or {}
 
 
+# Known authorize/check decision statuses we DELIBERATELY pass back to callers
+# even on non-2xx responses (e.g. denied tx returns 403 with {"status":"denied"}).
+# Tightened from "any payload with a 'status' field" to only these known values
+# so we don't silently swallow unrelated server errors that happen to include a
+# 'status' key.
+_DECISION_STATUSES = frozenset({"approved", "denied", "escalated", "executed", "failed"})
+
+
 def _request(base_url: str, api_key: str, method: str, path: str, body: dict | None = None) -> dict:
     url = f"{base_url.rstrip('/')}{path}"
     headers = {
@@ -39,8 +47,9 @@ def _request(base_url: str, api_key: str, method: str, path: str, body: dict | N
             payload = json.loads(e.read().decode())
         except Exception:
             raise VetoAPIError(f"HTTP {e.code}: {e.reason}", status_code=e.code)
-        # If server returned a structured error (denied tx etc.), still pass it back so caller can use status field
-        if isinstance(payload, dict) and "status" in payload:
+        # If server returned a known decision status (denied tx etc.), pass it back
+        # so caller can use the status field. Only known decision statuses qualify.
+        if isinstance(payload, dict) and payload.get("status") in _DECISION_STATUSES:
             return payload
         raise VetoAPIError(payload.get("error", f"HTTP {e.code}"), status_code=e.code, body=payload)
     except urllib.error.URLError as e:
@@ -149,13 +158,25 @@ def get_reputation(base_url: str, agent_id: str) -> dict:
 
 
 def verify_key(base_url: str, api_key: str) -> bool:
-    """Quick check that API key is valid."""
+    """Quick check that API key is valid.
+
+    Strategy: POST an empty body to /authorize/. The server requires both
+    `agent_id` and `action`, so a valid key with an empty body returns
+    HTTP 400 ("agent_id and action are required.") — that 400 is the proof
+    the key authenticated. 401/403 means the key is invalid.
+
+    Doesn't create a Transaction record (the view returns 400 before any
+    DB write).
+    """
     try:
-        r = _request(base_url, api_key, "POST", "/api/v1/authorize/", {})
-        # 400 (missing fields) means key is valid but request is invalid — that's a valid key
+        _request(base_url, api_key, "POST", "/api/v1/authorize/", {})
+        # 2xx is also a valid-key signal (defensive — shouldn't happen with empty body).
         return True
-    except VetoAPIError:
-        return False
+    except VetoAPIError as e:
+        # 400 = key authenticated, body was malformed (the expected path).
+        # 401/403 = key invalid.
+        # Anything else (5xx, network) = treat as unreachable / unverified.
+        return e.status_code == 400
 
 
 # ---------------------------------------------------------------------------
