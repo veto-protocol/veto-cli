@@ -801,17 +801,55 @@ def cmd_policy_list(args):
         info("No policies yet. Push one with `veto policy push <file>`.")
         return
 
+    # Pad name column to the longest name in the result so columns stay aligned
+    # even when names differ in length.
+    name_width = max((len(p.get("name", "")) for p in policies), default=20)
+    name_width = max(name_width, 20)  # don't shrink below 20 — looks weird
+
     print()
     print(f"  {C.BOLD}Policy versions:{C.RESET}")
     print()
     for p in policies:
         marker = f"{C.GREEN}●{C.RESET}" if p["is_active"] else f"{C.DIM}·{C.RESET}"
-        active_label = f"{C.GREEN}active{C.RESET}" if p["is_active"] else f"{C.DIM}inactive{C.RESET}"
+        active_label = (
+            f"{C.GREEN}active  {C.RESET}" if p["is_active"]
+            else f"{C.DIM}inactive{C.RESET}"
+        )
+        # Relative timestamp ("5 min ago", "2 days ago") — chronology legible
+        # even when active row isn't first (after a rollback).
+        rel = _relative_time(p.get("created_at"))
+        name = p.get("name", "")
         print(
-            f"  {marker} v{p['version_number']:<3}  {p['name']:30s}  "
-            f"{active_label}  {C.DIM}{p['policy_id']}{C.RESET}"
+            f"  {marker} v{p['version_number']:<3}  "
+            f"{name:<{name_width}}  "
+            f"{active_label}  "
+            f"{C.DIM}{rel:>14}  {p['policy_id']}{C.RESET}"
         )
     print()
+
+
+def _relative_time(iso_ts: str | None) -> str:
+    """'2026-04-29T10:09:57Z' → '23 min ago' (or '' if unparseable)."""
+    if not iso_ts:
+        return ""
+    try:
+        from datetime import datetime, timezone
+        # Accept '...Z' or '...+00:00'
+        s = iso_ts.replace("Z", "+00:00")
+        ts = datetime.fromisoformat(s)
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        delta = datetime.now(timezone.utc) - ts
+        secs = int(delta.total_seconds())
+        if secs < 60:
+            return f"{secs} sec ago"
+        if secs < 3600:
+            return f"{secs // 60} min ago"
+        if secs < 86400:
+            return f"{secs // 3600} hr ago"
+        return f"{secs // 86400} day{'s' if secs // 86400 != 1 else ''} ago"
+    except Exception:
+        return ""
 
 
 def cmd_policy_check(args):

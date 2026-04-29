@@ -241,6 +241,37 @@ class TestPolicyList(unittest.TestCase):
         v1_idx = out.find("v1")
         self.assertLess(v3_idx, v1_idx)
 
+    @patch.object(api_module, "policy_list", return_value={
+        "policies": [
+            # Newer (1 hour ago)
+            {"policy_id": "p2", "name": "AI Inference", "version_number": 2,
+             "is_active": True, "scope": "agent", "agent_id": "a",
+             "created_at": "2026-04-29T10:00:00+00:00"},
+            # Older (1 day ago)
+            {"policy_id": "p1", "name": "AI Inference", "version_number": 1,
+             "is_active": False, "scope": "agent", "agent_id": "a",
+             "created_at": "2026-04-28T10:00:00+00:00"},
+        ]
+    })
+    def test_list_shows_relative_time_and_aligned_columns(self, _):
+        """Regression for #43 — `veto policy list` now shows relative times
+        and pads the name column so columns stay aligned even when names differ."""
+        # Freeze time so relative computation is deterministic.
+        from unittest.mock import patch as p2
+        from datetime import datetime, timezone
+        fake_now = datetime(2026, 4, 29, 11, 0, 0, tzinfo=timezone.utc)
+
+        class _FakeDateTime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return fake_now if tz is None else fake_now.astimezone(tz)
+
+        with p2("veto_cli.main.datetime", _FakeDateTime, create=True):
+            code, out, _ = _run_cli(["policy", "list"])
+        self.assertEqual(code, 0)
+        # Relative time appears (won't be empty strings)
+        self.assertTrue("ago" in out, f"expected relative time in output, got: {out!r}")
+
     @patch.object(api_module, "policy_list", return_value={"policies": []})
     def test_list_empty_shows_hint(self, _):
         code, out, _ = _run_cli(["policy", "list"])
