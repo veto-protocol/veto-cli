@@ -1,16 +1,24 @@
 # Veto CLI
 
-> One-command setup for the Veto authorization layer — protect every payment your AI agent makes.
+> Authorization for AI agent payments — multi-dimensional YAML policy + Ed25519-signed decision receipts + offline verification. Composes with Stripe MPP, x402, AP2, Verifiable Intent.
 
-Veto is the policy and approval layer for AI agents that take real actions: x402 payments, Stripe Issuing transactions, on-chain transfers. The Veto CLI auto-configures Veto for any MCP-compatible client (Claude Desktop, Claude Code, Cursor, Zed, Continue) so your agent calls Veto before every transaction — and the transaction is allowed, denied, or escalated for human approval based on policies you define.
+Veto is the **policy + signed-evidence layer** for agents that take real actions across rails (x402, MPP, on-chain). Your agent calls `veto authorize` before each action, and the action is approved, denied, or escalated based on a YAML policy you author. Every decision ships with a cryptographically-signed receipt anyone can verify offline.
 
 ## Install
 
+The one-liner (curl) drops a self-contained venv at `~/.veto`:
+
 ```bash
-pip install veto-cli
+curl -fsSL https://veto-ai.com/install.sh | bash
 ```
 
-Requires Python 3.9+. No third-party dependencies — stdlib only.
+Or via Python:
+
+```bash
+pip install veto-cli      # or: pipx install veto-cli
+```
+
+Python 3.9+. Pulls in PyYAML (policy authoring) and `cryptography` (offline receipt verification).
 
 ## Quickstart — three commands
 
@@ -19,17 +27,29 @@ Requires Python 3.9+. No third-party dependencies — stdlib only.
 pip install veto-cli
 
 # 2. Register an account from the terminal (no website, no form)
-veto register --email me@example.com --preset dev
-# → ✓ Welcome to Veto. API key + default agent saved locally.
+veto register --email me@example.com --preset x402-micropay
+# → ✓ Welcome to Veto. API key + default agent saved to ~/.veto/config.json
 
 # 3. Ask Veto whether an action is allowed
-veto authorize --amount 0.05 --merchant api.anthropic.com --action payment
-# → APPROVED / DENIED / ESCALATED. Exit code 0/1/2.
+veto authorize --amount 0.05 --merchant api.openai.com --action payment
+# → APPROVED / DENIED / ESCALATED. Exit code 0/1/2/3.
 ```
 
-That's it. Three commands, zero web pages, working agent-payment gatekeeping.
+Every authorize call produces a **signed Ed25519 receipt**. Verify any receipt offline:
 
-## Policy presets
+```bash
+veto authorize --amount 0.05 --merchant api.openai.com --action payment --json | jq -r .receipt | veto verify -
+# → ✓ VERIFIED — Ed25519 / 0.1.1
+#     decision:         APPROVE
+#     decision_layer:   operator_policy
+#     policy:           x402 Micropayments v1
+#     policy_hash:      53aa6184…
+#     transaction_id:   …
+```
+
+The verifier fetches the public key from `veto-ai.com/.well-known/jwks.json` (cached locally) and validates the signature without contacting Veto's runtime. Tamper-evident, replay-deterministic, anyone-auditable.
+
+## Five policy presets to start from
 
 `veto register` applies a policy preset so your agent has sensible limits from the first authorize call. Pick one with `--preset`:
 
@@ -41,83 +61,100 @@ That's it. Three commands, zero web pages, working agent-payment gatekeeping.
 | `ad-spend` | Meta/Google ads | $1k/tx, escalate >$1k |
 | `dev` | Dogfooding/testing | $500/tx, no merchant restrictions |
 
-Override the agent's mission with `--mission "..."`. Override the agent name with `--agent-name "..."`. Edit policies later with the `veto policies` commands (coming in 0.4.0).
+## Customizing your policy — full lifecycle
 
-## Headline command — `veto authorize`
-
-```bash
-veto authorize \
-  --amount 0.05 \
-  --merchant api.anthropic.com \
-  --action payment
-
-# → 0 if approved, 1 if denied, 2 if escalated, 3 on error.
-```
-
-After `veto register`, the default agent UUID is saved locally — you don't need to pass `--agent` on every call.
-
-JSON output for piping into other tools:
+When the preset isn't enough, author your own:
 
 ```bash
-veto authorize --agent ... --amount 0.05 --merchant ... --action payment --json
+# Export a preset as a starting point
+veto policy export inference > my-policy.yaml
+
+# Edit the YAML — any text editor
+$EDITOR my-policy.yaml
+
+# Push it to Veto. Auto-versioned + auto-active. Old version deactivated.
+veto policy push my-policy.yaml
+# → ✓ Policy v2 pushed — now active
+
+# See your active policy as YAML
+veto policy show
+
+# Dry-run an action without recording a transaction
+veto policy check '{"action":"payment","amount":50,"merchant":"amazon.com"}'
+# → ✗ WOULD DENY — risk 1.00, dry-run
+#     reason_codes: AMOUNT_CAP_EXCEEDED, MERCHANT_NOT_ALLOWLISTED
+
+# List all your versions, newest first, with relative timestamps
+veto policy list
+
+# Roll back to a prior version (instant)
+veto policy activate <prior-policy-id>
 ```
 
-Read input from stdin:
+Every push creates a new versioned row. Receipts cite the exact `policy_id`, `version_number`, and `policy_hash` that was active at decision time — so an auditor in 12 months can prove which exact policy contents governed any past decision.
 
-```bash
-echo '{"agent_id":"...","amount":0.05,"merchant":"...","action":"payment"}' | veto authorize -
-```
-
-## Why this matters
-
-`veto authorize` returns the *decision* — approve, deny, or escalate — without any side effect. Your agent stays in control of the actual payment / signing / API call; Veto just gatekeeps. That's Mode 1 (decision API).
-
-`veto test` and `veto init`-installed MCP integration also support Mode 2 (Veto creates a Stripe-issued virtual card from your authorized request), but Mode 1 is the headline use case for any agent that already has its own wallet, card, or rails.
-
-## Commands
+## All commands
 
 | Command | What it does |
 |---|---|
-| `veto authorize` | Ask Veto whether an agent action is allowed (returns approve / deny / escalate). Headline command. |
-| `veto init` | Auto-detect MCP clients on your machine and add Veto to each one's config |
-| `veto status [agent_id]` | Show your agent's current reputation tier and recent decision history |
-| `veto test [agent_id]` | Fire a synthetic Mode-2 test transaction (creates a real Stripe-issued virtual card) |
-| `veto list` | List installed MCP clients and Veto integration status |
-| `veto uninstall` | Remove Veto from MCP client configs (does not delete your account) |
-| `veto mcp` | Run the Veto MCP server in foreground (used by MCP clients) |
+| `veto register` | CLI-native signup. Creates account + default agent + preset policy. |
+| `veto authorize` | Ask Veto whether an action is allowed. Headline command. |
+| `veto verify` | Verify a Veto receipt offline against the issuer's JWKS endpoint. |
+| `veto policy export/push/show/list/check/activate` | Author and manage versioned YAML policies. |
+| `veto init` | Auto-detect MCP clients on your machine (Claude Desktop, Cursor, Zed, Continue) and configure them to use Veto's MCP server. |
+| `veto status [agent_id]` | Show agent reputation tier + recent decision history. |
+| `veto list` / `uninstall` | List / remove Veto from MCP client configs. |
+| `veto mcp` | Run the Veto MCP server in stdio mode (used internally by MCP clients). |
 
 ## What Veto evaluates on every authorize call
 
-Each transaction passes through an 8-step pipeline before approval:
+8-step pipeline:
 
-1. **Pre-checks** — agent suspended? amount sane?
-2. **Policy enforcement** — per-tx limit, daily/monthly caps, merchant allowlist/blocklist
-3. **Prompt injection detection** — 40 regex patterns over the action description
-4. **Merchant fraud screening** — known-fraud database, typosquatting (SequenceMatcher), suspicious TLDs
-5. **Intent verification** — does the action match the agent's stated purpose?
-6. **Anomaly detection** — amount spike (>3× rolling avg), velocity, merchant diversity
-7. **LLM final verdict** — Claude Sonnet reviews the case
-8. **Reputation weighting** — agent trust tier modulates final risk score
+1. **Pre-checks** — agent suspended? kill switch? amount sane?
+2. **Policy enforcement** — per-tx / daily / monthly caps; merchant + address + chain + token allowlists/blocklists. Allowlist violations are hard deny at any amount.
+3. **Prompt injection detection** — 40+ regex patterns over the agent's stated context.
+4. **Merchant fraud screening** — known-fraud DB, typosquat detection, suspicious TLDs, hyphen-heavy domains.
+5. **Intent verification** — Claude Sonnet (or keyword fallback) checks whether the action matches the agent's mission.
+6. **Anomaly detection** — amount spikes (>3× 30-day avg), velocity bursts, merchant-diversity anomalies.
+7. **LLM final verdict** — Claude reviews aggregated signals.
+8. **Reputation weighting** — elite agents get more leeway, risky agents stricter scrutiny.
 
-Output: `approve` | `deny` | `escalate` (with risk score 0.0–1.0 and a human-readable reason).
+Output: `approve` | `deny` | `escalate` plus a `risk_score` (0–1) and structured `reason_codes` (`AMOUNT_CAP_EXCEEDED`, `MERCHANT_NOT_ALLOWLISTED`, `KNOWN_FRAUD_MERCHANT`, etc.). Receipt signs all of it.
+
+## v1 — the if-statement is the enforcement
+
+Wire `veto.authorize()` in front of every agent action and have your agent treat the verdict as ground truth: approve → execute, deny → halt, escalate → wait for a human. **Two lines of cooperation, infinite cryptographic auditability.**
+
+```python
+verdict = veto.authorize(action)
+if verdict.decision == "approve":
+    execute(action)
+elif verdict.decision == "escalate":
+    notify_human(verdict)
+# deny → drop the action, keep the receipt
+```
+
+The if-statement is your enforcement point. The receipt is your audit trail. Same operating model as Stripe Radar — your code asks, the engine answers, your code obeys — well-suited to the threat model that matters most: bugs, hallucinations, runaway loops, accidental over-spend.
+
+## v2 — enforcement moves to the rail
+
+In v2, the cooperation step disappears. The rails themselves require a Veto signature to settle, so a non-cooperative agent literally can't broadcast the transaction. **Same policy, same receipt format, same JWKS endpoint — different enforcement surface.** v1 operators carry forward without changes; the receipt format already reserves a `mandate_ref` field for forward compatibility.
+
+Mechanism specifics land closer to ship.
 
 ## Configuration
 
-The CLI stores state in `~/.veto/config.json` (mode `0o600`). It contains your API key and known agent IDs. No transaction data is stored locally.
+State at `~/.veto/config.json` (mode `0600`): API key, default agent ID, base URL. No transaction data stored locally.
 
-By default the CLI talks to `https://veto-ai.com`. To point at a self-hosted Veto:
-
-```bash
-veto init --api-key XXX --base-url https://veto.your-company.com
-```
+Default backend: `https://veto-ai.com`. Override with `--base-url` on any command (or via `VETO_BASE_URL` env var).
 
 ## Links
 
-- **Sign up:** https://veto-ai.com
-- **Docs:** https://veto-ai.com/docs
-- **Discord:** https://discord.gg/veto-ai
-- **GitHub:** https://github.com/veto-protocol
+- **Source (this CLI):** https://github.com/veto-protocol/veto-cli
+- **Open policy schema (APPS):** https://github.com/veto-protocol/x402-policy-schema
+- **Veto's own published policies:** https://github.com/veto-protocol/veto-policies
+- **Public JWKS for receipt verification:** https://veto-ai.com/.well-known/jwks.json
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+Elastic License v2 (ELv2). See [LICENSE](LICENSE). Copyright Investech Global LLC. You may use, modify, and embed Veto freely. You may not host Veto as a managed service to third parties or strip the licensing notices.
