@@ -157,4 +157,4 @@ Default backend: `https://veto-ai.com`. Override with `--base-url` on any comman
 
 ## License
 
-Elastic License v2 (ELv2). See [LICENSE](LICENSE). Copyright Investech Global LLC. You may use, modify, and embed Veto freely. You may not host Veto as a managed service to third parties or strip the licensing notices.
+Elastic License v2 (ELv2). See [LICENSE](LICENSE) for the full text and copyright. You may use, modify, and embed Veto freely. You may not host Veto as a managed service to third parties or strip the licensing notices.
