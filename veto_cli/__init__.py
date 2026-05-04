@@ -1,3 +1,3 @@
 """Veto CLI — one-command MCP setup for AI agent authorization."""
 
-__version__ = "0.5.4"
+__version__ = "0.6.0"

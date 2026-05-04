@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "veto-cli"
-version = "0.5.4"
+version = "0.6.0"
 description = "Veto CLI — one-command MCP setup for AI agent payment authorization."
 readme = "README.md"
 requires-python = ">=3.9"
@@ -26,7 +26,7 @@ keywords = [
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
+    "License :: Other/Proprietary License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.9",
@@ -41,6 +41,17 @@ dependencies = [
     "PyYAML>=6.0",
     # cryptography powers `veto verify` — Ed25519 signature check on signed receipts.
     "cryptography>=41.0",
+    # certifi gives the API client a portable CA bundle so HTTPS works on
+    # platforms whose system Python ships without a configured trust store
+    # (notably Homebrew Python on macOS, where the default urllib context
+    # otherwise fails with CERTIFICATE_VERIFY_FAILED).
+    "certifi>=2024.2.2",
+    # eth_account + eth_abi power `veto agent init` hard-stop deployment —
+    # signs the contract creation tx and ABI-encodes constructor args without
+    # requiring Foundry on the user's machine.
+    "eth_account>=0.13.0",
+    "eth_abi>=5.0.0",
+    "eth_utils>=4.0.0",
 ]
 
 [project.urls]
@@ -55,3 +66,6 @@ veto = "veto_cli.main:main"
 [tool.setuptools.packages.find]
 include = ["veto_cli*"]
 exclude = ["tests*", "*.egg-info"]
+
+[tool.setuptools.package-data]
+"veto_cli" = ["contracts/*.json", "templates/**/*"]

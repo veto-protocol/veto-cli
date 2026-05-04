@@ -88,8 +88,11 @@ def fetch_jwks(base_url: str, *, no_cache: bool = False, timeout: int = 10) -> d
 
     url = f"{base_url}/.well-known/jwks.json"
     req = urllib.request.Request(url, headers={"User-Agent": "veto-cli-verifier"})
+    # Reuse the SSL context from the API client so JWKS fetches benefit from
+    # certifi's trust store (Homebrew Python lacks one by default on macOS).
+    from veto_cli.api import _SSL_CTX as _ctx
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with urllib.request.urlopen(req, timeout=timeout, context=_ctx) as resp:
             jwks = json.loads(resp.read().decode())
     except urllib.error.HTTPError as e:
         raise KeyFetchError(f"JWKS fetch returned HTTP {e.code} from {url}")

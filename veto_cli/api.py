@@ -1,8 +1,10 @@
 """
-Lightweight Veto API client — stdlib only to keep CLI install frictionless.
+Lightweight Veto API client — stdlib + certifi only.
 """
 
 import json
+import os
+import ssl
 import urllib.error
 import urllib.request
 
@@ -10,6 +12,28 @@ from veto_cli import __version__
 
 
 DEFAULT_BASE_URL = "https://veto-ai.com"
+
+
+def _build_ssl_context() -> ssl.SSLContext:
+    """Return an SSL context with a usable trust store across platforms.
+
+    Homebrew Python on macOS frequently ships without a configured cert
+    bundle, which makes urllib's default context fail with
+    CERTIFICATE_VERIFY_FAILED. This walks a small fallback chain:
+    1. certifi's bundled root store (preferred — works everywhere)
+    2. The macOS system bundle at /etc/ssl/cert.pem (if certifi is missing)
+    3. Python's default context (last resort)
+    """
+    try:
+        import certifi  # type: ignore[import-not-found]
+        return ssl.create_default_context(cafile=certifi.where())
+    except ImportError:
+        if os.path.exists("/etc/ssl/cert.pem"):
+            return ssl.create_default_context(cafile="/etc/ssl/cert.pem")
+        return ssl.create_default_context()
+
+
+_SSL_CTX = _build_ssl_context()
 
 
 class VetoAPIError(Exception):
@@ -39,7 +63,7 @@ def _request(base_url: str, api_key: str, method: str, path: str, body: dict | N
     data = json.dumps(body).encode() if body else None
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
+        with urllib.request.urlopen(req, timeout=30, context=_SSL_CTX) as resp:
             return json.loads(resp.read().decode())
     except urllib.error.HTTPError as e:
         # Try to parse JSON error body; surface it through the exception so callers can decide.
@@ -90,7 +114,7 @@ def register(
     data = json.dumps(body).encode()
     req = urllib.request.Request(url, data=data, headers=headers, method="POST")
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
+        with urllib.request.urlopen(req, timeout=30, context=_SSL_CTX) as resp:
             return json.loads(resp.read().decode())
     except urllib.error.HTTPError as e:
         try:
@@ -148,7 +172,7 @@ def get_reputation(base_url: str, agent_id: str) -> dict:
     """Public endpoint — no auth."""
     url = f"{base_url.rstrip('/')}/api/v1/public/reputation/{agent_id}/"
     try:
-        with urllib.request.urlopen(url, timeout=30) as resp:
+        with urllib.request.urlopen(url, timeout=30, context=_SSL_CTX) as resp:
             return json.loads(resp.read().decode())
     except urllib.error.HTTPError as e:
         try:
@@ -190,7 +214,7 @@ def policy_export_preset(base_url: str, preset_name: str) -> dict:
     headers = {"User-Agent": f"veto-cli/{__version__}"}
     req = urllib.request.Request(url, headers=headers, method="GET")
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
+        with urllib.request.urlopen(req, timeout=30, context=_SSL_CTX) as resp:
             return json.loads(resp.read().decode())
     except urllib.error.HTTPError as e:
         try:

@@ -1,0 +1,35 @@
+# Fly.io deployment config for your Veto-governed agent.
+#
+# Deploy in 2 commands:
+#   fly launch --no-deploy     # creates the Fly app, sets the name + region
+#   fly secrets set VETO_API_KEY=... ANTHROPIC_API_KEY=... CDP_API_KEY_ID=... CDP_API_KEY_SECRET=... VETO_AGENT_ID=... CDP_WALLET_ID=... CDP_WALLET_ADDRESS=...
+#   fly deploy
+#
+# After deploy, the agent listens on https://<your-app>.fly.dev/chat
+# Send messages with: curl https://<app>.fly.dev/chat -X POST -H "Content-Type: application/json" -d '{"message":"hi"}'
+
+app = "{{AGENT_NAME}}"
+primary_region = "iad"  # change to your nearest region: ord (Chicago), lhr (London), nrt (Tokyo), syd (Sydney), etc.
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  MODE = "server"
+  NODE_ENV = "production"
+  PORT = "8080"
+  VETO_BASE_URL = "https://veto-ai.com"
+  NETWORK = "base-mainnet"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = "stop"      # stops the machine when idle (cheap)
+  auto_start_machines = true       # auto-restarts on incoming request
+  min_machines_running = 0         # set to 1 if you need always-warm
+  processes = ["app"]
+
+[[vm]]
+  cpu_kind = "shared"
+  cpus = 1
+  memory_mb = 256                  # plenty for an agent process; bump if you need more memory

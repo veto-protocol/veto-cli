@@ -1,0 +1,27 @@
+{
+  "name": "{{AGENT_NAME}}",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Conversational, tool-using AI agent governed by Veto. Local viem wallet — no third-party wallet vendor required. Scaffolded by `veto agent init`.",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "start": "tsx src/index.ts",
+    "build": "tsc",
+    "run-prod": "node dist/index.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.39.0",
+    "openai": "^4.80.0",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.0",
+    "undici": "^6.20.0",
+    "viem": "^2.21.0"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.0",
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  }
+}
