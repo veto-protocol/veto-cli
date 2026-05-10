@@ -352,6 +352,69 @@ def cmd_mcp(args):
     mcp_server.main()
 
 
+PLUGIN_REPO = "https://github.com/veto-protocol/claude-plugin"
+PLUGIN_DIR_NAME = "veto"
+
+
+def _claude_plugins_dir():
+    """Return the path Claude Code looks at for local plugins."""
+    return Path.home() / ".claude" / "plugins"
+
+
+def cmd_plugin_install(args):
+    """Clone the Veto Claude Code plugin into ~/.claude/plugins/veto/."""
+    import shutil
+    import subprocess
+
+    plugins_root = _claude_plugins_dir()
+    target = plugins_root / PLUGIN_DIR_NAME
+
+    if target.exists():
+        if not getattr(args, "force", False):
+            print(f"Veto plugin already installed at {target}.")
+            print("Run `veto plugin install --force` to reinstall, or `veto plugin uninstall` first.")
+            return
+        shutil.rmtree(target)
+
+    plugins_root.mkdir(parents=True, exist_ok=True)
+    print(f"Cloning {PLUGIN_REPO} → {target} …")
+    try:
+        subprocess.run(
+            ["git", "clone", "--depth=1", PLUGIN_REPO, str(target)],
+            check=True,
+        )
+    except FileNotFoundError:
+        print("git is not installed or not on PATH. Install git and try again.")
+        sys.exit(1)
+    except subprocess.CalledProcessError as e:
+        print(f"git clone failed (exit {e.returncode}). Check your network and try again.")
+        sys.exit(1)
+
+    print()
+    print("✔ Veto plugin installed.")
+    print()
+    print("Next steps:")
+    print("  1. Open Claude Code.")
+    print("  2. Run `/reload-plugins` to load the plugin.")
+    print("  3. Try `/veto:authorize $5 to api.weather.x402.io`.")
+    print()
+    print("The plugin needs VETO_API_KEY and VETO_AGENT_ID in your environment.")
+    print("If you haven't set those yet, run: `veto agent init my-claude-agent`.")
+
+
+def cmd_plugin_uninstall(args):
+    """Remove the Veto Claude Code plugin from ~/.claude/plugins/."""
+    import shutil
+
+    target = _claude_plugins_dir() / PLUGIN_DIR_NAME
+    if not target.exists():
+        print(f"Veto plugin is not installed (nothing at {target}).")
+        return
+    shutil.rmtree(target)
+    print(f"✔ Removed {target}.")
+    print("Run `/reload-plugins` in Claude Code to drop the slash commands + MCP server.")
+
+
 # Allowed action types — must match Transaction.ActionType in the backend.
 # CLI doesn't enforce these (backend is authoritative); listed in --help for transparency.
 _ALLOWED_ACTIONS = ("payment", "crypto_transfer", "tool_execution")
@@ -1532,6 +1595,19 @@ def cmd_agent_init(args):
             print(f"     {C.DIM}skipped — you can run `veto agent fund` and `veto agent deploy` later.{C.RESET}")
         print()
 
+    # ── Footer: show current network/rail + how to switch ────────────
+    current_network = secrets.get("NETWORK") or "base-sepolia"
+    current_rail = "EVM"
+    print(f"  {C.DIM}{'─' * 60}{C.RESET}")
+    print(f"  You're on {C.BOLD}{current_network}{C.RESET} {C.DIM}({current_rail}){C.RESET}. To change:")
+    print()
+    print(f"    {C.DIM}▸{C.RESET} Use Base Mainnet:    {C.CYAN}veto agent init {agent_name} --network base-mainnet{C.RESET}")
+    print(f"    {C.DIM}▸{C.RESET} Use Solana:          {C.CYAN}veto agent init {agent_name} --rail solana{C.RESET}")
+    print(f"    {C.DIM}▸{C.RESET} Other EVM chains:    {C.DIM}--network optimism | arbitrum | ethereum | polygon{C.RESET}")
+    print(f"      {C.DIM}                       (append -sepolia for testnet, -mainnet for mainnet){C.RESET}")
+    print(f"  {C.DIM}{'─' * 60}{C.RESET}")
+    print()
+
 
 def cmd_agent_configure(args):
     """Re-run the onboarding prompts on an existing scaffolded project.
@@ -1745,6 +1821,36 @@ def main():
     p_mcp = sub.add_parser("mcp", help="Run the MCP server (used by MCP clients)")
     p_mcp.set_defaults(func=cmd_mcp)
 
+    # ── veto plugin install / uninstall — Claude Code plugin ─────────
+    p_plugin = sub.add_parser(
+        "plugin",
+        help="Install / remove the Veto Claude Code plugin",
+        description=(
+            "Manage the Veto Claude Code plugin — slash commands\n"
+            "(/veto:authorize, /veto:receipts, /veto:policy), the MCP server,\n"
+            "and a PreToolUse hook that intercepts payment-shaped tool calls."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    plugin_sub = p_plugin.add_subparsers(dest="plugin_action", required=True)
+
+    p_plugin_install = plugin_sub.add_parser(
+        "install",
+        help=f"Clone {PLUGIN_REPO} into ~/.claude/plugins/{PLUGIN_DIR_NAME}/",
+    )
+    p_plugin_install.add_argument(
+        "--force",
+        action="store_true",
+        help="Reinstall even if already present.",
+    )
+    p_plugin_install.set_defaults(func=cmd_plugin_install)
+
+    p_plugin_uninstall = plugin_sub.add_parser(
+        "uninstall",
+        help=f"Remove ~/.claude/plugins/{PLUGIN_DIR_NAME}/",
+    )
+    p_plugin_uninstall.set_defaults(func=cmd_plugin_uninstall)
+
     # ── `veto agent ...` — scaffolding + lifecycle commands for runnable agents
     p_agent = sub.add_parser(
         "agent",
@@ -1792,6 +1898,20 @@ def main():
         "--no-prompt",
         action="store_true",
         help="Skip interactive prompts. Scaffold with empty .env (good for CI or scripted use).",
+    )
+    p_agent_init.add_argument(
+        "--rail",
+        choices=["evm", "solana"],
+        default="evm",
+        help="Which rail to scaffold for (default: evm). solana support is post-v1.",
+    )
+    p_agent_init.add_argument(
+        "--network",
+        help=(
+            "Network to deploy on. EVM: base-sepolia | base-mainnet | optimism-sepolia | optimism-mainnet | "
+            "arbitrum-sepolia | arbitrum-mainnet | ethereum-sepolia | ethereum-mainnet | polygon-amoy | "
+            "polygon-mainnet. Default: base-sepolia."
+        ),
     )
     p_agent_init.set_defaults(func=cmd_agent_init)
 

@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "veto-cli"
-version = "0.6.0"
-description = "Veto CLI — one-command MCP setup for AI agent payment authorization."
+version = "0.7.1"
+description = "Veto CLI — agent-payment policy + on-chain hard-stop. Any agent. Any rail."
 readme = "README.md"
 requires-python = ">=3.9"
 license = { file = "LICENSE" }
