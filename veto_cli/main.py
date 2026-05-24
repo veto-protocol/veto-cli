@@ -20,7 +20,7 @@ import os
 import sys
 from pathlib import Path
 
-from veto_cli import api, config_paths, mcp_config
+from veto_cli import api, auth, config_paths, mcp_config
 
 
 # ── Pretty print helpers ──
@@ -424,6 +424,130 @@ _ALLOWED_ACTIONS = ("payment", "crypto_transfer", "tool_execution")
 _ALLOWED_PRESETS = ("personal", "inference", "x402-micropay", "ad-spend", "dev")
 
 _STDIN_FIELDS = {"agent_id", "agent", "amount", "merchant", "action", "description", "context"}
+
+
+def cmd_login(args):
+    """
+    `veto login` — magic-link sign-in with the device-code flow.
+
+    Same flow as the npm @veto-protocol/cli package:
+      1. Ask for email (or take --email arg)
+      2. POST /api/v1/auth/email/start/ with {email, device_code}
+      3. Open webmail in browser (Gmail/Outlook/iCloud/etc.)
+      4. Poll /api/v1/auth/cli/poll/ until the user clicks the magic link
+      5. Save api_key + agent_id + client_id + email locally
+    """
+    base_url = args.base_url or "https://veto-ai.com"
+    api_base = f"{base_url.rstrip('/')}/api/v1"
+
+    # Already signed in? Short-circuit unless --force.
+    state = _load_state()
+    if state.get("api_key") and not getattr(args, "force", False) and not getattr(args, "email", None):
+        masked = state["api_key"][:12] + "…" + state["api_key"][-4:]
+        existing_email = state.get("email")
+        as_clause = f" as {existing_email}" if existing_email else ""
+        ok(f"Already signed in{as_clause}.")
+        print(f"  {C.DIM}api_key={masked}  agent_id={state.get('default_agent', '—')}{C.RESET}")
+        print(f"  {C.DIM}Use {C.BOLD}veto logout{C.RESET}{C.DIM} to sign out, or {C.BOLD}veto login --force{C.RESET}{C.DIM} to re-auth.{C.RESET}")
+        return
+
+    banner()
+
+    email = (getattr(args, "email", None) or _prompt("Your email")).strip().lower()
+    if not auth.is_valid_email(email):
+        _eprint(f"  {C.RED}✗{C.RESET} Not a valid email.")
+        sys.exit(2)
+
+    device_code = auth.generate_device_code()
+
+    try:
+        auth.start(api_base=api_base, email=email, device_code=device_code)
+    except auth.AuthError as e:
+        _eprint(f"  {C.RED}✗{C.RESET} Couldn't send magic link: {e}")
+        sys.exit(3)
+    except Exception as e:
+        _eprint(f"  {C.RED}✗{C.RESET} Connection failed: {e}")
+        sys.exit(3)
+
+    print()
+    ok(f"Magic link sent to {C.CYAN}{email}{C.RESET}.")
+    print(f"  {C.DIM}Opening your inbox in a browser. Click the link to finish signing in.{C.RESET}")
+    print(f"  {C.DIM}(Waiting up to 15 min. Press Ctrl-C to abort.){C.RESET}")
+    print()
+
+    inbox = auth.open_inbox_for(email)
+    if inbox:
+        print(f"  {C.DIM}Opened: {inbox}{C.RESET}")
+        print()
+
+    print(f"  {C.DIM}waiting for verification", end="", flush=True)
+    last_dot = [0.0]
+
+    def _on_tick(elapsed: int) -> None:
+        # Print a dot every poll, throttled so we don't spam the line.
+        if elapsed - last_dot[0] >= 2:
+            print(".", end="", flush=True)
+            last_dot[0] = elapsed
+
+    try:
+        ready = auth.poll_until_ready(api_base=api_base, device_code=device_code, on_tick=_on_tick)
+    except KeyboardInterrupt:
+        print()
+        warn("Aborted. Run `veto login` again when ready.")
+        sys.exit(130)
+    except TimeoutError as e:
+        print()
+        _eprint(f"  {C.RED}✗{C.RESET} {e}")
+        sys.exit(4)
+    except auth.AuthError as e:
+        print()
+        _eprint(f"  {C.RED}✗{C.RESET} {e}")
+        sys.exit(3)
+    print(f"{C.RESET}")
+
+    _save_state({
+        "api_key": ready.api_key,
+        "base_url": base_url,
+        "default_agent": ready.agent_id,
+        "client_id": ready.client_id,
+        "email": email,
+    })
+
+    masked = ready.api_key[:12] + "…" + ready.api_key[-4:]
+    print()
+    ok(f"Signed in as {C.CYAN}{email}{C.RESET}.")
+    print(f"  {C.DIM}api_key={masked}  agent_id={ready.agent_id}  saved to {STATE_PATH}{C.RESET}")
+    print()
+    print(f"  {C.BOLD}Try it:{C.RESET}")
+    print(f"    {C.CYAN}veto authorize --amount 0.05 --merchant api.openai.com --action payment{C.RESET}")
+    print()
+
+
+def cmd_logout(args):
+    """Wipe credentials from ~/.veto/config.json."""
+    state = _load_state()
+    if not state.get("api_key"):
+        info("Not signed in.")
+        return
+    email = state.get("email")
+    try:
+        os.remove(STATE_PATH)
+    except FileNotFoundError:
+        pass
+    ok(f"Signed out{f' ({email})' if email else ''}.")
+
+
+def cmd_whoami(args):
+    """Show the currently signed-in identity (masked)."""
+    state = _load_state()
+    if not state.get("api_key"):
+        info(f"Not signed in. Run {C.BOLD}veto login{C.RESET}.")
+        return
+    masked = state["api_key"][:12] + "…" + state["api_key"][-4:]
+    print(f"  {C.DIM}email:{C.RESET}    {state.get('email') or '—'}")
+    print(f"  {C.DIM}api_key:{C.RESET}  {masked}")
+    print(f"  {C.DIM}agent_id:{C.RESET} {state.get('default_agent') or '—'}")
+    print(f"  {C.DIM}config:{C.RESET}   {STATE_PATH}")
 
 
 def cmd_register(args):
@@ -1682,6 +1806,30 @@ def main():
     p_register.add_argument("--org-name", help="Organization name (default: derived from email)")
     p_register.add_argument("--yes", "-y", action="store_true", help="Skip confirmation if existing config would be overwritten")
     p_register.set_defaults(func=cmd_register)
+
+    # `veto login` — magic-link sign-in (same flow as @veto-protocol/cli on npm).
+    # This is the recommended path going forward; `veto register` stays for the
+    # legacy email-only direct-creation flow used by older docs + scripts.
+    p_login = sub.add_parser(
+        "login",
+        help="Sign in via magic link (recommended)",
+        description=(
+            "Sign in to Veto with a one-tap magic link.\n\n"
+            "We send a link to your inbox, open your webmail in the browser, and wait\n"
+            "for you to click it. Once verified, we save your API key + default agent\n"
+            "to ~/.veto/config.json. Same flow as the npm @veto-protocol/cli package."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p_login.add_argument("--email", help="Skip the prompt and use this email")
+    p_login.add_argument("--force", action="store_true", help="Re-authenticate even if already signed in")
+    p_login.set_defaults(func=cmd_login)
+
+    p_logout = sub.add_parser("logout", help="Sign out and remove local credentials")
+    p_logout.set_defaults(func=cmd_logout)
+
+    p_whoami = sub.add_parser("whoami", help="Show the currently signed-in identity")
+    p_whoami.set_defaults(func=cmd_whoami)
 
     # Headline command — what agents call before each real action.
     p_authorize = sub.add_parser(
